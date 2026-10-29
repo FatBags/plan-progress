@@ -51,7 +51,7 @@ Options in `/config`:
 
 ## How Claude uses it
 
-The mod registers a `plan_progress` tool. Claude sends the plan once:
+The mod registers a `plan_progress` tool and adds a short section to Claude's system prompt. That section tells Claude to put a bar up for any task of 3 or more steps, in every permission mode, and to keep it in step with the work. Claude sends the plan once:
 
 ```
 {id, title, stages:[{name, steps:[{title}]}]}

@@ -16,6 +16,16 @@ const MAX_BARS = 6
 const MAX_AGENTS_SHOWN = 3
 const KEPT_SESSIONS = 30
 
+const RULES = [
+  '# Plan progress bars',
+  'The user sees live progress bars above the prompt, drawn by the plan_progress tool. In every permission mode, not only plan mode:',
+  '- For any task with 3 or more steps, call plan_progress before starting work, with the whole plan: {id, title, stages:[{name, steps:[{title}]}]}. 2-7 stages, titles of at most 4 words, in the user\'s language, one id per task.',
+  '- Move the bar as you work: {id, next:true} when a step is finished, or {id, done:[...], active:"..."}. Keep it in step with the real work, not ahead of it.',
+  '- Right before asking the user a question, send {id, state:"needs_input", note}. When something fails, send {id, failed:"<step>", note}. When the task is finished, send {id, state:"done"} before your final answer.',
+  '- If the plan changes, resend stages under the same id; finished steps are kept by title.',
+  '- Skip the bar for one-step tasks and plain questions.',
+].join('\n')
+
 const bars = atom({ plugin: 'plan-progress', key: 'bars' } as const, [], {
   shape: 'bars-1',
 })
@@ -393,15 +403,6 @@ function pillLabel(bar: Bar, now: number): string {
   }
 }
 
-function pillHover(bar: Bar, now: number): string {
-  const active = allSteps(bar).find(s => s.status === 'active' || s.status === 'failed')
-  const stage = bar.stages.find(st => active && st.steps.includes(active))
-  const parts = [stage?.name, active?.title].filter(Boolean).join(' › ')
-  const spent = seconds((bar.finishedAt ?? now) - bar.startedAt)
-  const note = bar.note ? ` — ${bar.note}` : ''
-  return `${parts || bar.title} · ${spent} so far${note}`
-}
-
 const xml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
@@ -426,6 +427,27 @@ function markers(bar: Bar, now: number): Marker[] {
         out.push({ at, kind: j === 0 ? 'stage' : 'step', hover })
       }
       i++
+    })
+  }
+  return out
+}
+
+// What hovering one step's slice of the bar tells.
+function stepHovers(bar: Bar, now: number): string[] {
+  const out: string[] = []
+  for (const stage of bar.stages) {
+    stage.steps.forEach((step, j) => {
+      const where = j === 0 ? `${stage.name} › ` : ''
+      const took = step.startedAt ? seconds((step.endedAt ?? now) - step.startedAt) : ''
+      out.push(
+        step.status === 'done'
+          ? `${where}${step.title} · took ${took}`
+          : step.status === 'pending'
+            ? `Next: ${where}${step.title}`
+            : step.status === 'failed'
+              ? `${where}${step.title} · failed${bar.note ? `: ${bar.note}` : ''}`
+              : `${stage.name} › ${step.title} · ${took} so far${bar.note ? ` — ${bar.note}` : ''}`,
+      )
     })
   }
   return out
@@ -473,8 +495,8 @@ function barSvg(bar: Bar, width: number, height: number, now: number, twinkle: b
     if (x > pillX - 4 && x < pillX + pillW + 4) return ''
     const passed = x < fillW
     return m.kind === 'stage'
-      ? `<g><title>${xml(m.hover)}</title><rect x="${x - 6}" y="0" width="12" height="${height}" fill="transparent"/><rect x="${x - 1.5}" y="${height * 0.28}" width="3" height="${height * 0.44}" rx="1.5" fill="#fff" opacity="${passed ? 0.75 : 0.45}"/></g>`
-      : `<g><title>${xml(m.hover)}</title><circle cx="${x}" cy="${height / 2}" r="7" fill="transparent"/><circle cx="${x}" cy="${height / 2}" r="2" fill="#fff" opacity="${passed ? 0.7 : 0.35}"/></g>`
+      ? `<rect x="${x - 1.5}" y="${height * 0.28}" width="3" height="${height * 0.44}" rx="1.5" fill="#fff" opacity="${passed ? 0.75 : 0.45}"/>`
+      : `<circle cx="${x}" cy="${height / 2}" r="2" fill="#fff" opacity="${passed ? 0.7 : 0.35}"/>`
   })
 
   return [
@@ -485,7 +507,7 @@ function barSvg(bar: Bar, width: number, height: number, now: number, twinkle: b
     dots.join(''),
     `</g>`,
     marks.join(''),
-    `<g><title>${xml(pillHover(bar, now))}</title>`,
+    `<g>`,
     `<rect x="${pillX}" y="2" width="${pillW}" height="${pillH}" rx="${pillH / 2}" fill="${c.pill}"/>`,
     `<text x="${pillX + pillW / 2}" y="${height / 2}" dy="0.35em" text-anchor="middle" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="${fontSize}" font-weight="600" fill="#fff">${xml(label)}</text>`,
     `</g></svg>`,
@@ -748,14 +770,35 @@ async function drawBars(
       )
     }
     const width = Math.max(160, Math.min(1400, barCols * 8))
+    const hovers = stepHovers(bar, now)
     return (
-      <Svg
-        source={barSvg(bar, width, 26, now, live.twinkle)}
-        alt={`${bar.title}: ${percent(bar)}%, ${pillLabel(bar, now)}`}
-        width={width}
-        height={26}
-        isInteractive
-      />
+      <Box key={`track-${bar.id}`} position="relative">
+        <Svg
+          source={barSvg(bar, width, 26, now, live.twinkle)}
+          alt={`${bar.title}: ${percent(bar)}%, ${pillLabel(bar, now)}`}
+          width={width}
+          height={26}
+        />
+        <Box position="absolute" top={0} left={0} right={0} bottom={0} flexDirection="row">
+          {hovers.map((text, i) => (
+            <Box key={`slice-${bar.id}-${i}`} flexGrow={1} position="relative">
+              <Box
+                position="absolute"
+                top={1}
+                left={0}
+                display="none"
+                hover={{ display: 'flex' }}
+                backgroundColor="#1e1e22"
+                borderStyle="round"
+                borderColor="#55555c"
+                paddingX={1}
+              >
+                <Text wrap="truncate-end">{text}</Text>
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      </Box>
     )
   }
 
@@ -776,6 +819,17 @@ async function drawBars(
                 {`${percent(bar)}%`.padStart(4)}
               </Text>
             </Box>
+            {bar.agents.length > 0 ? (
+              <Button
+                key={`fold-${bar.id}`}
+                label={folded ? '▸' : '▾'}
+                plain
+                dimColor
+                onPress={() => {
+                  void update($, isAgentsFolded, v => !v)
+                }}
+              />
+            ) : null}
             <Button key={`close-${bar.id}`} label="✕" plain dimColor onPress={close(bar.id)} />
           </Box>
           {bar.note && bar.state !== 'running' && bar.state !== 'done' ? (
@@ -887,6 +941,13 @@ export const register: Register = (on, options) => {
 
     await keepTicking($)
     return next(e)
+  })
+
+  // The rules for using the bars, in every mode, not only plan mode.
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    if (!e.tools.some(t => TOOL_PATTERN.test(t))) return composed
+    return { sections: [...composed.sections, { id: 'plan-progress:rules', text: RULES, scope: 'session' as const }] }
   })
 
   // The tool only changes the bars in memory, so it never needs a prompt.

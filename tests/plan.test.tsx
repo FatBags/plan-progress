@@ -203,3 +203,40 @@ test('where the band draws, no pane opens by itself', async ($, on) => {
   expect(ran.text).toBe('Plan progress pane opened.')
   expect(opened).toEqual(['plan-progress'])
 })
+
+test('the working rules reach the system prompt in every mode', async ($, on) => {
+  engine(on)
+  on('prompt.compose', () => ({
+    sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' as const }],
+  }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const base = { model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', surfaces: ['desktop' as const], outputStyle: null, traits: [] }
+  const withTool = await $.prompt.compose({ ...base, tools: ['Read', 'mcp__plan-progress__plan_progress'] } as never)
+  const rules = withTool.sections.find(s => s.id === 'plan-progress:rules')
+  expect(rules?.text).toContain('In every permission mode')
+  expect(rules?.scope).toBe('session')
+
+  const without = await $.prompt.compose({ ...base, tools: ['Read'] } as never)
+  expect(without.sections.some(s => s.id === 'plan-progress:rules')).toBe(false)
+})
+
+test('the bar image does not change while only the clock moves', async ($, on) => {
+  const { clock } = engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await callTool($, PLAN)
+
+  const sourceNow = async () => {
+    const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+    const svg = await ui.find({ type: 'Svg' })
+    await ui.unmount()
+    return svg?.props
+  }
+  const first = await sourceNow()
+  expect(first?.isInteractive).toBeUndefined()
+  await clock.advance(5000)
+  expect((await sourceNow())?.source).toBe(first?.source)
+
+  await callTool($, { tool: 'mcp__plan-progress__plan_progress', id: 'checkout', next: true })
+  expect((await sourceNow())?.source).not.toBe(first?.source)
+})
