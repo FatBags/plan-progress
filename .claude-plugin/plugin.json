@@ -1,6 +1,6 @@
 {
   "name": "plan-progress",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Live plan progress bars above the prompt: stages, steps, subagent rows and soft sounds. Offline, no network or shell access.",
   "license": "MIT",
   "userConfig": {

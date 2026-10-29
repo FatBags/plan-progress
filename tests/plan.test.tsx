@@ -238,3 +238,22 @@ test('the bar image does not change while only the clock moves', async ($, on) =
   await callTool($, { tool: 'mcp__plan-progress__plan_progress', id: 'checkout', next: true })
   expect((await sourceNow())?.source).not.toBe(first?.source)
 })
+
+test('values an earlier version left behind never stop the start', async ($, on) => {
+  const registered: string[] = []
+  // What 0.2.0 stored: a tagged value where a list is expected, and junk in the store.
+  mock.store(on, { sessions: {}, 'bars:session-1': { shape: 'bars-1', value: [] } })
+  mock.clock(on, { now: 1_000_000 })
+  on('state.get', () => ({ value: { value: { shape: 'bars-1', value: [] }, version: 3 } }))
+  on('session.id', () => ({ value: 'session-1' }))
+  on('tool.register', () => ({ value: { tool: 'mcp__plan-progress__plan_progress' } }))
+  on('command.register', (_, e) => {
+    registered.push(e.name)
+    return { value: { command: e.name } }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(registered).toContain('progress')
+  expect(registered).toContain('progress-clear')
+})

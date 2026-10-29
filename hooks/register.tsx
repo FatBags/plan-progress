@@ -26,7 +26,17 @@ const RULES = [
   '- Skip the bar for one-step tasks and plain questions.',
 ].join('\n')
 
-const bars = atom({ plugin: 'plan-progress', key: 'bars' } as const, [] as Bar[])
+const bars = atom({ plugin: 'plan-progress', key: 'list' } as const, [] as Bar[])
+
+// A stored value is only trusted when it is a list of bars.
+function isBar(v: unknown): v is Bar {
+  const b = v as Bar
+  return !!b && typeof b === 'object' && typeof b.id === 'string' && Array.isArray(b.stages) && Array.isArray(b.agents)
+}
+
+function asBars(v: unknown): Bar[] {
+  return Array.isArray(v) ? v.filter(isBar) : []
+}
 const isHidden = atom({ plugin: 'plan-progress', key: 'isHidden' } as const, false)
 const isAgentsFolded = atom(
   { plugin: 'plan-progress', key: 'isAgentsFolded' } as const,
@@ -578,7 +588,7 @@ function isLive(list: readonly Bar[]): boolean {
 
 // Ticks once a second while something on the bars moves, for the clocks.
 async function keepTicking($: Engine) {
-  const list = await read($, bars)
+  const list = await readBars($)
   if (isLive(list)) {
     live.ticker ??= $.clock.every(1000, () => {
       void tickOnce($)
@@ -591,7 +601,7 @@ async function keepTicking($: Engine) {
 
 async function tickOnce($: Engine) {
   await update($, tick, n => (n + 1) % 1_000_000)
-  if (!isLive(await read($, bars))) {
+  if (!isLive(await readBars($))) {
     live.ticker?.cancel()
     live.ticker = undefined
   }
@@ -614,7 +624,7 @@ async function playFor($: Engine, before: BarState | undefined, after: BarState)
 async function mutate($: Engine, fn: (list: readonly Bar[]) => readonly Bar[]) {
   let next: readonly Bar[] = []
   await update($, bars, list => {
-    next = fn(list)
+    next = fn(asBars(list))
     return [...next]
   })
   if (live.sessionKey) await $.store.set(live.sessionKey, next)
@@ -640,7 +650,7 @@ async function removeBar($: Engine, id: string) {
 
 async function applyAndReport($: Engine, input: ToolInput): Promise<Outcome> {
   const now = await $.clock.now()
-  const before = (await read($, bars)).find(b => b.id === str(input.id))?.state
+  const before = (await readBars($)).find(b => b.id === str(input.id))?.state
   let outcome: Outcome = { error: 'not applied' }
   await mutate($, list => {
     outcome = apply(list, input, now)
@@ -667,6 +677,10 @@ async function applyAndReport($: Engine, input: ToolInput): Promise<Outcome> {
 async function openPaneUnlessBand($: Engine) {
   if (live.bandSeen) return
   await $.ui.open({ id: PANE, title: 'Plan progress' })
+}
+
+async function readBars($: Engine): Promise<Bar[]> {
+  return asBars(await read($, bars))
 }
 
 async function setAgent($: Engine, barId: string, agentId: string, patch: Partial<AgentRow>) {
@@ -844,6 +858,29 @@ async function drawBars(
   )
 }
 
+async function restoreSession($: Engine) {
+  const id = await $.session.id()
+  const sessionKey = `bars:${id}`
+  live.sessionKey = sessionKey
+
+  // Keep a short index of sessions so the store does not grow forever.
+  const stored = await $.store.get('sessions')
+  const index = Array.isArray(stored) ? stored.filter((k): k is string => typeof k === 'string') : []
+  const kept = [...index.filter(k => k !== sessionKey), sessionKey]
+  for (const old of kept.slice(0, Math.max(0, kept.length - KEPT_SESSIONS))) {
+    await $.store.delete(old)
+  }
+  await $.store.set('sessions', kept.slice(-KEPT_SESSIONS))
+
+  // A resumed session gets its bars back.
+  const current = await readBars($)
+  if (current.length === 0) {
+    const saved = asBars(await $.store.get(sessionKey))
+    if (saved.length > 0) await update($, bars, () => saved)
+  }
+  for (const b of await readBars($)) for (const a of b.agents) agentBar.set(a.id, b.id)
+}
+
 export const register: Register = (on, options) => {
   const opts = options as unknown as Options
   live.doneBarMs = Math.max(1, Number(opts.doneBarSeconds ?? 30)) * 1000
@@ -852,26 +889,6 @@ export const register: Register = (on, options) => {
 
 
   on('session.start', async ($, e, next) => {
-    const id = await $.session.id()
-    const sessionKey = `bars:${id}`
-    live.sessionKey = sessionKey
-
-    // Keep a short index of sessions so the store does not grow forever.
-    const index = ((await $.store.get('sessions')) as string[] | undefined) ?? []
-    const kept = [...index.filter(k => k !== sessionKey), sessionKey]
-    for (const old of kept.slice(0, Math.max(0, kept.length - KEPT_SESSIONS))) {
-      await $.store.delete(old)
-    }
-    await $.store.set('sessions', kept.slice(-KEPT_SESSIONS))
-
-    // A resumed session gets its bars back.
-    const current = await read($, bars)
-    if (current.length === 0) {
-      const saved = (await $.store.get(sessionKey)) as Bar[] | undefined
-      if (Array.isArray(saved) && saved.length > 0) await update($, bars, () => saved)
-    }
-    for (const b of await read($, bars)) for (const a of b.agents) agentBar.set(a.id, b.id)
-
     await $.tool.register({
       name: TOOL_NAME,
       isDeferred: false,
@@ -937,6 +954,11 @@ export const register: Register = (on, options) => {
       await $.command.register({ name, description })
     }
 
+    try {
+      await restoreSession($)
+    } catch {
+      // A saved value it cannot read is left behind; the bars start empty.
+    }
     await keepTicking($)
     return next(e)
   })
@@ -983,7 +1005,7 @@ export const register: Register = (on, options) => {
     if (!ran.agentId) return ran
     const agentId = ran.agentId
     const now = await $.clock.now()
-    const list = await read($, bars)
+    const list = await readBars($)
     const target = [...list]
       .filter(b => b.state !== 'done')
       .sort((a, b) => b.touchedAt - a.touchedAt)[0]
@@ -1012,7 +1034,7 @@ export const register: Register = (on, options) => {
     const barId = agentId ? agentBar.get(agentId) : undefined
     if (agentId && barId && typeof e.effort === 'string') {
       const effort = e.effort
-      const list = await read($, bars)
+      const list = await readBars($)
       const row = list.find(b => b.id === barId)?.agents.find(a => a.id === agentId)
       if (row && row.effort !== effort) {
         await setAgent($, barId, agentId, { effort })
@@ -1054,7 +1076,7 @@ export const register: Register = (on, options) => {
     const isOn = (await $.store.get('autoclose')) !== true
     await $.store.set('autoclose', isOn)
     if (isOn) {
-      for (const b of await read($, bars)) if (b.state === 'done') await scheduleAutoclose($, b.id)
+      for (const b of await readBars($)) if (b.state === 'done') await scheduleAutoclose($, b.id)
     }
     return {
       text: isOn
@@ -1070,7 +1092,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || (await read($, isHidden))) return next(e)
-    const list = await read($, bars)
+    const list = await readBars($)
     if (list.length === 0) return next(e)
     live.bandSeen = true
     const tree = await drawBars($, e, list, e.props.bodyColumns, e.props.isWorking)
@@ -1088,7 +1110,7 @@ export const register: Register = (on, options) => {
   // The same bars in a side pane, for surfaces that draw no band (a cloud
   // session watched from the app) or when opened with /progress-pane.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const list = await read($, bars)
+    const list = await readBars($)
     if (list.length === 0) {
       const { Text } = $.ui.resolve(e)
       return <Text dimColor>No plans yet.</Text>
