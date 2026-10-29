@@ -40,7 +40,7 @@ export type Bar = {
 declare module 'claude-code' {
   interface PluginState {
     'plan-progress': {
-      bars: Shaped<Bar[]>
+      bars: Bar[]
       isHidden: boolean
       isAgentsFolded: boolean
       tick: number

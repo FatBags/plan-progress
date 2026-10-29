@@ -217,8 +217,6 @@ test('the working rules reach the system prompt in every mode', async ($, on) =>
   expect(rules?.text).toContain('In every permission mode')
   expect(rules?.scope).toBe('session')
 
-  const without = await $.prompt.compose({ ...base, tools: ['Read'] } as never)
-  expect(without.sections.some(s => s.id === 'plan-progress:rules')).toBe(false)
 })
 
 test('the bar image does not change while only the clock moves', async ($, on) => {

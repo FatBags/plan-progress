@@ -20,8 +20,8 @@ This is a clean-room version of the idea behind [zycck/claude-mods](https://gith
 
 ## Where the bars show
 
-- **Local sessions** (the terminal, or the desktop app's local Code tab): above the prompt.
-- **Cloud sessions** watched from the app: the app draws nothing above the prompt there, so a side pane, **Plan progress**, opens by itself when the first bar is created. `/progress-pane` opens it anywhere.
+- **Local sessions** (the terminal, or the desktop app's local Code tab): above the prompt. `/progress-pane` shows them in a side pane instead.
+- **Cloud sessions** watched from the app attach no screen that plugins draw on, so nothing a mod draws shows there. The tool still answers, and the bars are saved.
 
 ## Security
 

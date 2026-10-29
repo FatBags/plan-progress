@@ -11,7 +11,7 @@ import type { AgentRow, Bar, BarState, Stage, Step } from '../types'
 
 const TOOL_NAME = 'plan_progress'
 const PANE = 'plan-progress'
-const TOOL_PATTERN = /^mcp__plan-progress__plan_progress$/
+const TOOL = 'mcp__plan-progress__plan_progress'
 const MAX_BARS = 6
 const MAX_AGENTS_SHOWN = 3
 const KEPT_SESSIONS = 30
@@ -26,9 +26,7 @@ const RULES = [
   '- Skip the bar for one-step tasks and plain questions.',
 ].join('\n')
 
-const bars = atom({ plugin: 'plan-progress', key: 'bars' } as const, [], {
-  shape: 'bars-1',
-})
+const bars = atom({ plugin: 'plan-progress', key: 'bars' } as const, [] as Bar[])
 const isHidden = atom({ plugin: 'plan-progress', key: 'isHidden' } as const, false)
 const isAgentsFolded = atom(
   { plugin: 'plan-progress', key: 'isAgentsFolded' } as const,
@@ -946,14 +944,10 @@ export const register: Register = (on, options) => {
   // The rules for using the bars, in every mode, not only plan mode.
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
-    if (!e.tools.some(t => TOOL_PATTERN.test(t))) return composed
     return { sections: [...composed.sections, { id: 'plan-progress:rules', text: RULES, scope: 'session' as const }] }
   })
 
-  // The tool only changes the bars in memory, so it never needs a prompt.
-  on('tool.check', { tool: TOOL_PATTERN }, () => ({ decision: 'allow' as const }))
-
-  on('tool.call', { tool: TOOL_PATTERN }, async ($, e) => {
+  on('tool.call', { tool: TOOL }, async ($, e) => {
     const outcome = await applyAndReport($, e as unknown as ToolInput)
     if (outcome.error !== undefined) return { deny: outcome.error }
     return { result: summary(outcome.bar) }
@@ -1079,7 +1073,16 @@ export const register: Register = (on, options) => {
     const list = await read($, bars)
     if (list.length === 0) return next(e)
     live.bandSeen = true
-    return drawBars($, e, list, e.props.bodyColumns, e.props.isWorking)
+    const tree = await drawBars($, e, list, e.props.bodyColumns, e.props.isWorking)
+    const below = await next(e)
+    if (!below) return tree
+    const { Box } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column" gap={1}>
+        {tree}
+        {below}
+      </Box>
+    )
   })
 
   // The same bars in a side pane, for surfaces that draw no band (a cloud
