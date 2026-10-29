@@ -1,0 +1,5 @@
+{
+  "name": "fatbags-mods",
+  "owner": { "name": "FatBags" },
+  "plugins": [{ "name": "plan-progress", "source": "./", "description": "Live plan progress bars above the prompt" }]
+}
