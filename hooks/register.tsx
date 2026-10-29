@@ -2,15 +2,16 @@
 //
 // Written from scratch. It uses only $.state, $.store, $.ui, $.audio (its own
 // sound files), $.clock, $.session.id, $.tool.register and
-// $.command.register. No network, no processes, no file access.
+// $.command.register and $.ui.open (its own pane). No network, no processes, no file access.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, ResolveInput } from 'claude-code'
 
 import type { AgentRow, Bar, BarState, Stage, Step } from '../types'
 
 const TOOL_NAME = 'plan_progress'
-const TOOL = 'mcp__plan-progress__plan_progress'
+const PANE = 'plan-progress'
+const TOOL_PATTERN = /^mcp__plan-progress__plan_progress$/
 const MAX_BARS = 6
 const MAX_AGENTS_SHOWN = 3
 const KEPT_SESSIONS = 30
@@ -541,6 +542,9 @@ const live = {
   ticker: undefined as { cancel: () => void } | undefined,
   doneBarMs: 30_000,
   sounds: true,
+  twinkle: true,
+  // Set once the band above the prompt has drawn bars on this surface.
+  bandSeen: false,
 }
 
 // Agent id -> the bar its row lives under; rebuilt from the bars on reload.
@@ -628,10 +632,21 @@ async function applyAndReport($: Engine, input: ToolInput): Promise<Outcome> {
   })
   const result = outcome as Outcome
   if (result.bar) {
+    if (before === undefined) {
+      $.clock.after(1500, () => {
+        void openPaneUnlessBand($)
+      })
+    }
     await playFor($, before, result.bar.state)
     if (result.bar.state === 'done' && before !== 'done') await scheduleAutoclose($, result.bar.id)
   }
   return result
+}
+
+// Where no band draws (a cloud session watched from the app), the pane does.
+async function openPaneUnlessBand($: Engine) {
+  if (live.bandSeen) return
+  await $.ui.open({ id: PANE, title: 'Plan progress' })
 }
 
 async function setAgent($: Engine, barId: string, agentId: string, patch: Partial<AgentRow>) {
@@ -642,11 +657,146 @@ async function setAgent($: Engine, barId: string, agentId: string, patch: Partia
   )
 }
 
+// Draws the bars and their agent rows, for the band and the pane alike.
+async function drawBars(
+  $: Engine,
+  e: ResolveInput,
+  list: readonly Bar[],
+  bodyColumns: number,
+  isWorking: boolean,
+) {
+  const frame = await read($, tick)
+  const folded = await read($, isAgentsFolded)
+  const now = await $.clock.now()
+  const columns = Math.max(40, bodyColumns)
+  const isTerminal = e.surface === 'terminal'
+  const ui = $.ui.resolve(e)
+  const { Box, Text, Button } = ui
+  const Svg = 'Svg' in ui ? ui.Svg : undefined
+
+  const close = (id: string) => () => {
+    void removeBar($, id)
+  }
+
+  const titleW = Math.min(20, Math.max(10, Math.floor(columns * 0.18)))
+  const barCols = Math.max(12, columns - titleW - 12)
+
+  const agentRows = (bar: Bar) => {
+    if (folded || bar.agents.length === 0) return []
+    const shown = bar.agents.slice(-MAX_AGENTS_SHOWN)
+    const hidden = bar.agents.slice(0, -MAX_AGENTS_SHOWN)
+    const rows = shown.map(a => {
+      const c = AGENT_COLORS[a.state]
+      const time =
+        a.state === 'running' ? runningClock(now - a.startedAt) : seconds((a.endedAt ?? now) - a.startedAt)
+      const meta = `(${a.model}${a.effort ? ` · ${a.effort}` : ''})`
+      return (
+        <Box key={`agent-${bar.id}-${a.id}`} flexDirection="row" gap={1}>
+          <Box width={5}>
+            <Text dimColor>🤖 {a.index}</Text>
+          </Box>
+          <Box flexGrow={1} flexDirection="row" backgroundColor={c.row} paddingX={1}>
+            <Box flexGrow={1} flexShrink={1}>
+              <Text wrap="truncate-end">
+                <Text color={c.dot}>● </Text>
+                {a.description} <Text dimColor>{meta}</Text>
+                {a.tool ? <Text color="#9b87f5">{`   ${a.tool}`}</Text> : null}
+              </Text>
+            </Box>
+            <Text tabular>{time}</Text>
+          </Box>
+        </Box>
+      )
+    })
+    if (hidden.length > 0) {
+      const done = hidden.filter(a => a.state === 'done').length
+      rows.push(
+        <Box key={`agent-${bar.id}-more`} flexDirection="row" gap={1}>
+          <Box width={5}>
+            <Text dimColor>🤖 +{hidden.length}</Text>
+          </Box>
+          <Box flexGrow={1} backgroundColor="#2b2b30" paddingX={1}>
+            <Text dimColor>
+              {hidden.length} more agent{hidden.length > 1 ? 's' : ''} · {done} done
+            </Text>
+          </Box>
+        </Box>,
+      )
+    }
+    return rows
+  }
+
+  const drawBar = (bar: Bar) => {
+    if (isTerminal || !Svg) {
+      const moving = live.twinkle && isWorking && bar.state === 'running'
+      const cells = barCells(bar, barCols, now, moving ? frame : 0)
+      // Runs of cells with the same colors become one Text.
+      const runs: Cell[] = []
+      for (const cell of cells) {
+        const last = runs[runs.length - 1]
+        if (last && last.fg === cell.fg && last.bg === cell.bg && last.bold === cell.bold) last.ch += cell.ch
+        else runs.push({ ...cell })
+      }
+      return (
+        <Text wrap="truncate-end">
+          {runs.map(r => (
+            <Text color={r.fg} backgroundColor={r.bg} bold={r.bold}>
+              {r.ch}
+            </Text>
+          ))}
+        </Text>
+      )
+    }
+    const width = Math.max(160, Math.min(1400, barCols * 8))
+    return (
+      <Svg
+        source={barSvg(bar, width, 26, now, live.twinkle)}
+        alt={`${bar.title}: ${percent(bar)}%, ${pillLabel(bar, now)}`}
+        width={width}
+        height={26}
+        isInteractive
+      />
+    )
+  }
+
+  return (
+    <Box flexDirection="column">
+      {list.map((bar, i) => (
+        <Box key={`bar-${bar.id}`} flexDirection="column" marginTop={i > 0 ? 1 : 0}>
+          <Box flexDirection="row" gap={1} alignItems="center">
+            <Box width={titleW} flexDirection="row">
+              <Text color={COLORS[bar.state].pill}>{ICONS[bar.state]} </Text>
+              <Text weight="semibold" wrap="truncate-end">
+                {bar.title}
+              </Text>
+            </Box>
+            <Box flexGrow={1}>{drawBar(bar)}</Box>
+            <Box width={5}>
+              <Text dimColor tabular>
+                {`${percent(bar)}%`.padStart(4)}
+              </Text>
+            </Box>
+            <Button key={`close-${bar.id}`} label="✕" plain dimColor onPress={close(bar.id)} />
+          </Box>
+          {bar.note && bar.state !== 'running' && bar.state !== 'done' ? (
+            <Box paddingLeft={titleW + 1}>
+              <Text color={COLORS[bar.state].pill} wrap="truncate-end">
+                {bar.note}
+              </Text>
+            </Box>
+          ) : null}
+          {agentRows(bar)}
+        </Box>
+      ))}
+    </Box>
+  )
+}
+
 export const register: Register = (on, options) => {
   const opts = options as unknown as Options
   live.doneBarMs = Math.max(1, Number(opts.doneBarSeconds ?? 30)) * 1000
   live.sounds = opts.sounds !== false
-  const twinkle = opts.twinkle !== false
+  live.twinkle = opts.twinkle !== false
 
 
   on('session.start', async ($, e, next) => {
@@ -730,6 +880,7 @@ export const register: Register = (on, options) => {
       ['progress-clear', 'Remove all plan progress bars'],
       ['progress-agents', 'Fold or show the agent rows under the bars'],
       ['plan-progress-autoclose', 'Turn on or off finished bars leaving on their own'],
+      ['progress-pane', 'Show the plan progress bars in a side pane'],
     ] as const) {
       await $.command.register({ name, description })
     }
@@ -739,9 +890,9 @@ export const register: Register = (on, options) => {
   })
 
   // The tool only changes the bars in memory, so it never needs a prompt.
-  on('tool.check', { tool: TOOL }, () => ({ decision: 'allow' as const }))
+  on('tool.check', { tool: TOOL_PATTERN }, () => ({ decision: 'allow' as const }))
 
-  on('tool.call', { tool: TOOL }, async ($, e) => {
+  on('tool.call', { tool: TOOL_PATTERN }, async ($, e) => {
     const outcome = await applyAndReport($, e as unknown as ToolInput)
     if (outcome.error !== undefined) return { deny: outcome.error }
     return { result: summary(outcome.bar) }
@@ -857,134 +1008,27 @@ export const register: Register = (on, options) => {
     }
   })
 
+  on('command.run', { command: 'progress-pane' }, async $ => {
+    await $.ui.open({ id: PANE, title: 'Plan progress' })
+    return { text: 'Plan progress pane opened.' }
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || (await read($, isHidden))) return next(e)
     const list = await read($, bars)
     if (list.length === 0) return next(e)
-    const frame = await read($, tick)
-    const folded = await read($, isAgentsFolded)
-    const now = await $.clock.now()
-    const columns = Math.max(40, e.props.bodyColumns)
-    const isTerminal = e.surface === 'terminal'
-    const ui = $.ui.resolve(e)
-    const { Box, Text, Button } = ui
-    const Svg = 'Svg' in ui ? ui.Svg : undefined
+    live.bandSeen = true
+    return drawBars($, e, list, e.props.bodyColumns, e.props.isWorking)
+  })
 
-    const close = (id: string) => () => {
-      void removeBar($, id)
+  // The same bars in a side pane, for surfaces that draw no band (a cloud
+  // session watched from the app) or when opened with /progress-pane.
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const list = await read($, bars)
+    if (list.length === 0) {
+      const { Text } = $.ui.resolve(e)
+      return <Text dimColor>No plans yet.</Text>
     }
-
-    const titleW = Math.min(20, Math.max(10, Math.floor(columns * 0.18)))
-    const barCols = Math.max(12, columns - titleW - 12)
-
-    const agentRows = (bar: Bar) => {
-      if (folded || bar.agents.length === 0) return []
-      const shown = bar.agents.slice(-MAX_AGENTS_SHOWN)
-      const hidden = bar.agents.slice(0, -MAX_AGENTS_SHOWN)
-      const rows = shown.map(a => {
-        const c = AGENT_COLORS[a.state]
-        const time =
-          a.state === 'running' ? runningClock(now - a.startedAt) : seconds((a.endedAt ?? now) - a.startedAt)
-        const meta = `(${a.model}${a.effort ? ` · ${a.effort}` : ''})`
-        return (
-          <Box key={`agent-${bar.id}-${a.id}`} flexDirection="row" gap={1}>
-            <Box width={5}>
-              <Text dimColor>🤖 {a.index}</Text>
-            </Box>
-            <Box flexGrow={1} flexDirection="row" backgroundColor={c.row} paddingX={1}>
-              <Box flexGrow={1} flexShrink={1}>
-                <Text wrap="truncate-end">
-                  <Text color={c.dot}>● </Text>
-                  {a.description} <Text dimColor>{meta}</Text>
-                  {a.tool ? <Text color="#9b87f5">{`   ${a.tool}`}</Text> : null}
-                </Text>
-              </Box>
-              <Text tabular>{time}</Text>
-            </Box>
-          </Box>
-        )
-      })
-      if (hidden.length > 0) {
-        const done = hidden.filter(a => a.state === 'done').length
-        rows.push(
-          <Box key={`agent-${bar.id}-more`} flexDirection="row" gap={1}>
-            <Box width={5}>
-              <Text dimColor>🤖 +{hidden.length}</Text>
-            </Box>
-            <Box flexGrow={1} backgroundColor="#2b2b30" paddingX={1}>
-              <Text dimColor>
-                {hidden.length} more agent{hidden.length > 1 ? 's' : ''} · {done} done
-              </Text>
-            </Box>
-          </Box>,
-        )
-      }
-      return rows
-    }
-
-    const drawBar = (bar: Bar) => {
-      if (isTerminal || !Svg) {
-        const live = twinkle && e.props.isWorking && bar.state === 'running'
-        const cells = barCells(bar, barCols, now, live ? frame : 0)
-        // Runs of cells with the same colors become one Text.
-        const runs: Cell[] = []
-        for (const cell of cells) {
-          const last = runs[runs.length - 1]
-          if (last && last.fg === cell.fg && last.bg === cell.bg && last.bold === cell.bold) last.ch += cell.ch
-          else runs.push({ ...cell })
-        }
-        return (
-          <Text wrap="truncate-end">
-            {runs.map(r => (
-              <Text color={r.fg} backgroundColor={r.bg} bold={r.bold}>
-                {r.ch}
-              </Text>
-            ))}
-          </Text>
-        )
-      }
-      const width = Math.max(160, Math.min(1400, barCols * 8))
-      return (
-        <Svg
-          source={barSvg(bar, width, 26, now, twinkle)}
-          alt={`${bar.title}: ${percent(bar)}%, ${pillLabel(bar, now)}`}
-          width={width}
-          height={26}
-          isInteractive
-        />
-      )
-    }
-
-    return (
-      <Box flexDirection="column">
-        {list.map((bar, i) => (
-          <Box key={`bar-${bar.id}`} flexDirection="column" marginTop={i > 0 ? 1 : 0}>
-            <Box flexDirection="row" gap={1} alignItems="center">
-              <Box width={titleW} flexDirection="row">
-                <Text color={COLORS[bar.state].pill}>{ICONS[bar.state]} </Text>
-                <Text weight="semibold" wrap="truncate-end">
-                  {bar.title}
-                </Text>
-              </Box>
-              <Box flexGrow={1}>{drawBar(bar)}</Box>
-              <Box width={5}>
-                <Text dimColor tabular>
-                  {`${percent(bar)}%`.padStart(4)}
-                </Text>
-              </Box>
-              <Button key={`close-${bar.id}`} label="✕" plain dimColor onPress={close(bar.id)} />
-            </Box>
-            {bar.note && bar.state !== 'running' && bar.state !== 'done' ? (
-              <Box paddingLeft={titleW + 1}>
-                <Text color={COLORS[bar.state].pill} wrap="truncate-end">
-                  {bar.note}
-                </Text>
-              </Box>
-            ) : null}
-            {agentRows(bar)}
-          </Box>
-        ))}
-      </Box>
-    )
+    return drawBars($, e, list, e.props.bodyColumns, true)
   })
 }

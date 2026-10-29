@@ -18,6 +18,11 @@ This is a clean-room version of the idea behind [zycck/claude-mods](https://gith
 - **Sounds:** short ones for a question, an error and done.
 - **Resume:** bars are saved per session and come back when you resume it.
 
+## Where the bars show
+
+- **Local sessions** (the terminal, or the desktop app's local Code tab): above the prompt.
+- **Cloud sessions** watched from the app: the app draws nothing above the prompt there, so a side pane, **Plan progress**, opens by itself when the first bar is created. `/progress-pane` opens it anywhere.
+
 ## Security
 
 The mod is one hooks module and three sound files. It calls only these engine features:
@@ -26,7 +31,7 @@ The mod is one hooks module and three sound files. It calls only these engine fe
 - **audio:** its own sound files
 - **session id:** to save bars per session
 - **tool and command registration**
-- **drawing above the prompt**
+- **drawing** above the prompt and in its own side pane
 
 It has no network access, no update checker, no shell commands and no file access. Run `claude plugin validate .` to see the full list of calls on `$`.
 
@@ -35,6 +40,7 @@ It has no network access, no update checker, no shell commands and no file acces
 - `/progress` shows or hides the bars.
 - `/progress-clear` removes all bars.
 - `/progress-agents` folds or shows the agent rows.
+- `/progress-pane` shows the bars in a side pane.
 - `/plan-progress-autoclose` turns on (or off again) finished bars leaving on their own after `doneBarSeconds`.
 
 Options in `/config`:
